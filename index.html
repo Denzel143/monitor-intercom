@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Program 2 - Monitor Penerima (Deteksi Gerakan Super Sensitif)</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body, html { width: 100%; height: 100%; overflow: hidden; background-color: #000; }
+        
+        #video-wrapper {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 1;
+        }
+
+        #remote-video, #detection-canvas {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        #detection-canvas {
+            z-index: 2; 
+        }
+        
+        .status-message {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background-color: rgba(0, 0, 0, 0.7); color: white; padding: 20px;
+            border-radius: 10px; text-align: center; z-index: 5; font-family: Arial, sans-serif;
+        }
+        
+        #motion-status {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background-color: rgba(200, 0, 0, 0.75);
+            color: white;
+            padding: 8px 15px;
+            border-radius: 5px;
+            z-index: 10;
+            font-family: Arial, sans-serif;
+            font-weight: bold;
+            font-size: 14px;
+            transition: opacity 0.3s;
+        }
+
+        .hidden { display: none; }
+
+        .controls {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 10;
+            display: flex;
+            gap: 15px;
+        }
+        .control-button {
+            width: 60px;
+            height: 60px;
+            background-color: rgba(0, 0, 0, 0.6);
+            border: 2px solid white;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            transition: background-color 0.2s;
+        }
+        .control-button:hover {
+            background-color: rgba(255, 255, 255, 0.3);
+        }
+        .control-button.active {
+            background-color: #d93025; /* Merah untuk Push-to-Talk aktif */
+        }
+        /* Style untuk tombol buzzer unmute */
+        .control-button.unmuted {
+            background-color: #1a73e8; /* Biru untuk buzzer aktif */
+        }
+        
+        /* Overlay untuk interaksi pertama */
+        #start-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.9);
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+            font-family: Arial, sans-serif;
+            text-align: center;
+            cursor: pointer;
+        }
+        #start-overlay-content {
+            padding: 30px;
+            max-width: 80%;
+            background-color: rgba(50, 50, 50, 0.8);
+            border-radius: 15px;
+        }
+        #start-overlay h2 {
+            margin-bottom: 20px;
+            font-size: 24px;
+        }
+        #start-overlay p {
+            margin-bottom: 20px;
+            font-size: 16px;
+            line-height: 1.5;
+        }
+        #start-button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 18px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        #start-button:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div id="start-overlay">
+        <div id="start-overlay-content">
+            <h2>Monitor Penerima - Deteksi Gerakan</h2>
+            <p>Program ini membutuhkan interaksi untuk mengaktifkan audio.</p>
+            <button id="start-button">Klik Layar untuk Memulai</button>
+        </div>
+    </div>
+
+    <div id="video-wrapper">
+        <video id="remote-video" autoplay playsinline muted></video>
+        <canvas id="detection-canvas"></canvas>
+    </div>
+
+    <div class="status-message" id="statusMessage">
+        <h2>Monitor Penerima</h2>
+        <p>Menunggu sinyal video dari kamera...</p>
+    </div>
+
+    <div id="motion-status" class="hidden">MOTION DETECTED</div>
+
+    <div class="controls">
+        <div id="toggle-audio-btn" class="control-button">
+            </div>
+        <div id="toggle-beep-btn" class="control-button">
+            </div>
+        <div id="push-to-talk-btn" class="control-button">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line></svg>
+        </div>
+    </div>
+    
+    <canvas id="motion-comparison-canvas" style="display:none;"></canvas>
+
+    <script src="https://download.agora.io/sdk/release/AgoraRTC_N-4.20.2.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+
+    <script>
+        const remoteVideoElement = document.getElementById('remote-video');
+        const canvasElement = document.getElementById('detection-canvas');
+        const statusMessage = document.getElementById('statusMessage');
+        const toggleAudioBtn = document.getElementById('toggle-audio-btn');
+        const pushToTalkBtn = document.getElementById('push-to-talk-btn');
+        const startOverlay = document.getElementById('start-overlay');
+        const startButton = document.getElementById('start-button');
+        // --- PENAMBAHAN ELEMEN TOMBOL BARU ---
+        const toggleBeepBtn = document.getElementById('toggle-beep-btn');
+
+        const motionStatusElement = document.getElementById('motion-status');
+        const motionCanvas = document.getElementById('motion-comparison-canvas');
+        const motionCtx = motionCanvas.getContext('2d', { willReadFrequently: true });
+        let lastFrameData = null;
+        let motionTimeoutId = null;
+        
+        let audioContext = null;
+        let beepInterval = null;
+        let beepCount = 0;
+        let isBeeping = false;
+        // --- PENAMBAHAN VARIABEL KONDISI MUTE BUZZER ---
+        let isBeepMuted = false;
+        
+        const APP_ID = "bdc4d3eed2ba4f32bc2b81f9473fb816";
+        const TOKEN = null;
+        const CHANNEL = "cctv-channel-1";
+        const client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
+
+        let remoteUser = null; 
+        let isAudioMuted = false;
+        let localMonitorAudioTrack = null; 
+
+        let detectionModel = null;
+        const objectsToDetect = ['person', 'car', 'motorcycle', 'bus', 'truck'];
+
+        const speakerOnIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>`;
+        const speakerOffIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>`;
+
+        // --- PENAMBAHAN IKON UNTUK TOMBOL BUZZER ---
+        const bellIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`;
+        const bellOffIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.73 21a2 2 0 0 1-3.46 0"></path><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M1 1l22 22"></path></svg>`;
+
+        // Fungsi untuk membuat dan memainkan beep
+        function playBeep() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            oscillator.frequency.value = 880; 
+            oscillator.type = 'sine';
+            gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+            oscillator.start(audioContext.currentTime);
+            oscillator.stop(audioContext.currentTime + 0.5);
+        }
+
+        // Fungsi untuk memulai beep berulang
+        function startBeep() {
+            // --- MODIFIKASI: Tambahkan pengecekan isBeepMuted ---
+            if (isBeeping || isBeepMuted) return;
+            isBeeping = true;
+            beepCount = 0;
+            beepInterval = setInterval(() => {
+                if (beepCount >= 10) {
+                    stopBeep();
+                    return;
+                }
+                playBeep();
+                beepCount++;
+            }, 1000); 
+        }
+
+        function stopBeep() {
+            if (beepInterval) {
+                clearInterval(beepInterval);
+                beepInterval = null;
+            }
+            isBeeping = false;
+            beepCount = 0;
+        }
+
+        function updateSpeakerButton() {
+            toggleAudioBtn.innerHTML = isAudioMuted ? speakerOffIcon : speakerOnIcon;
+        }
+
+        // --- FUNGSI BARU UNTUK UPDATE TAMPILAN TOMBOL BUZZER ---
+        function updateBeepButton() {
+            toggleBeepBtn.innerHTML = isBeepMuted ? bellOffIcon : bellIcon;
+            if (isBeepMuted) {
+                toggleBeepBtn.classList.remove('unmuted');
+            } else {
+                toggleBeepBtn.classList.add('unmuted');
+            }
+        }
+
+        async function loadDetectionModel() {
+            try {
+                console.log("Memuat model deteksi objek...");
+                statusMessage.innerHTML += "<p>Memuat model AI...</p>";
+                detectionModel = await cocoSsd.load();
+                console.log("Model deteksi berhasil dimuat.");
+                statusMessage.innerHTML = "<h2>Monitor Penerima</h2><p>Menunggu sinyal video dari kamera...</p>";
+            } catch (err) {
+                console.error("Gagal memuat model deteksi:", err);
+                statusMessage.innerHTML = `<h2>Error</h2><p>Gagal memuat model AI.</p>`;
+            }
+        }
+
+        function detectMotion() {
+            const width = 64; 
+            const height = 48;
+            motionCanvas.width = width;
+            motionCanvas.height = height;
+
+            motionCtx.drawImage(remoteVideoElement, 0, 0, width, height);
+            const currentFrame = motionCtx.getImageData(0, 0, width, height);
+            
+            if (lastFrameData) {
+                let diff = 0;
+                for (let i = 0; i < currentFrame.data.length; i += 4) {
+                    const r_diff = Math.abs(currentFrame.data[i] - lastFrameData.data[i]);
+                    const g_diff = Math.abs(currentFrame.data[i+1] - lastFrameData.data[i+1]);
+                    const b_diff = Math.abs(currentFrame.data[i+2] - lastFrameData.data[i+2]);
+                    diff += r_diff + g_diff + b_diff;
+                }
+                
+                const avgDiff = diff / (width * height * 3);
+                
+                if (avgDiff > 1.5) { 
+                    motionStatusElement.classList.remove('hidden');
+                    if (!isBeeping) {
+                        startBeep();
+                    }
+                    clearTimeout(motionTimeoutId);
+                    motionTimeoutId = setTimeout(() => {
+                        motionStatusElement.classList.add('hidden');
+                        stopBeep();
+                    }, 2000); 
+                }
+            }
+            
+            lastFrameData = currentFrame;
+        }
+
+        async function runDetectionAndMotion() {
+            if (!detectionModel || remoteVideoElement.readyState < 3) {
+                requestAnimationFrame(runDetectionAndMotion);
+                return;
+            }
+            
+            detectMotion();
+
+            const predictions = await detectionModel.detect(remoteVideoElement);
+            const ctx = canvasElement.getContext('2d');
+            canvasElement.width = remoteVideoElement.videoWidth;
+            canvasElement.height = remoteVideoElement.videoHeight;
+            ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+
+            predictions.forEach(prediction => {
+                if (objectsToDetect.includes(prediction.class) && prediction.score > 0.6) {
+                    const [x, y, width, height] = prediction.bbox;
+                    ctx.strokeStyle = '#FF0000';
+                    ctx.lineWidth = 4;
+                    ctx.fillStyle = '#FF0000';
+                    ctx.font = '18px Arial';
+                    ctx.strokeRect(x, y, width, height);
+                    const label = `${prediction.class} (${Math.round(prediction.score * 100)}%)`;
+                    ctx.fillText(label, x, y > 20 ? y - 5 : y + height + 20);
+                }
+            });
+
+            requestAnimationFrame(runDetectionAndMotion);
+        }
+
+        async function startListening() {
+            client.on("user-published", async (user, mediaType) => {
+                await client.subscribe(user, mediaType);
+                remoteUser = user; 
+
+                if (mediaType === "video") {
+                    statusMessage.classList.add('hidden');
+                    user.videoTrack.play(remoteVideoElement);
+
+                    remoteVideoElement.onloadedmetadata = () => {
+                        console.log("Video diterima, memulai deteksi objek dan gerakan...");
+                        runDetectionAndMotion();
+                    };
+                }
+                if (mediaType === "audio") {
+                    user.audioTrack.play();
+                    user.audioTrack.setVolume(isAudioMuted ? 0 : 100);
+                }
+            });
+
+            client.on("user-unpublished", (user, mediaType) => {
+                if (mediaType === 'video') {
+                    remoteVideoElement.srcObject = null;
+                    const ctx = canvasElement.getContext('2d');
+                    ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+                    lastFrameData = null;
+
+                    remoteUser = null;
+                    statusMessage.classList.remove('hidden');
+                    console.log("Kamera berhenti mengirim sinyal video.");
+                }
+            });
+
+            try {
+                await client.join(APP_ID, CHANNEL, TOKEN, null);
+                console.log("Berhasil bergabung, menunggu broadcast...");
+            } catch (err) {
+                console.error("Gagal bergabung:", err);
+                statusMessage.innerHTML = `<h2>Error</h2><p>${err.message}</p>`;
+            }
+        }
+
+        toggleAudioBtn.addEventListener('click', () => {
+            if (!remoteUser || !remoteUser.audioTrack) return;
+            isAudioMuted = !isAudioMuted;
+            remoteUser.audioTrack.setVolume(isAudioMuted ? 0 : 100);
+            updateSpeakerButton();
+            console.log(`Audio dari kamera ${isAudioMuted ? 'dimatikan' : 'dinyalakan'}.`);
+        });
+
+        // --- EVENT LISTENER BARU UNTUK TOMBOL BUZZER ---
+        toggleBeepBtn.addEventListener('click', () => {
+            isBeepMuted = !isBeepMuted;
+            updateBeepButton();
+            // Jika buzzer sedang berbunyi saat dimute, langsung hentikan
+            if (isBeepMuted && isBeeping) {
+                stopBeep();
+            }
+            console.log(`Buzzer deteksi gerakan ${isBeepMuted ? 'dimatikan' : 'dinyalakan'}.`);
+        });
+
+
+        const startTalk = async () => {
+            if (localMonitorAudioTrack) return; 
+            console.log("Tombol bicara ditekan. Memulai pengiriman audio...");
+            pushToTalkBtn.classList.add('active');
+            try {
+                if (remoteUser && remoteUser.audioTrack) {
+                    remoteUser.audioTrack.setVolume(0);
+                }
+                localMonitorAudioTrack = await AgoraRTC.createMicrophoneAudioTrack();
+                await client.publish(localMonitorAudioTrack);
+                console.log("Audio monitor berhasil dikirim.");
+            } catch (err) {
+                console.error("Gagal mengirim audio monitor:", err);
+                pushToTalkBtn.classList.remove('active');
+            }
+        };
+
+        const stopTalk = async () => {
+            if (!localMonitorAudioTrack) return;
+            console.log("Tombol bicara dilepas. Menghentikan pengiriman audio.");
+            pushToTalkBtn.classList.remove('active');
+            try {
+                await client.unpublish(localMonitorAudioTrack);
+                localMonitorAudioTrack.stop();
+                localMonitorAudioTrack.close();
+                localMonitorAudioTrack = null;
+                console.log("Pengiriman audio monitor dihentikan.");
+                if (remoteUser && remoteUser.audioTrack && !isAudioMuted) {
+                    remoteUser.audioTrack.setVolume(100);
+                }
+            } catch (err) {
+                console.error("Gagal menghentikan audio monitor:", err);
+            }
+        };
+
+        pushToTalkBtn.addEventListener('mousedown', startTalk);
+        pushToTalkBtn.addEventListener('mouseup', stopTalk);
+        pushToTalkBtn.addEventListener('mouseleave', stopTalk); 
+        pushToTalkBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startTalk(); });
+        pushToTalkBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopTalk(); });
+
+        startButton.addEventListener('click', () => {
+            startOverlay.style.display = 'none';
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            // --- MODIFIKASI: Panggil fungsi update untuk kedua tombol ---
+            updateSpeakerButton();
+            updateBeepButton();
+            loadDetectionModel();
+            startListening();
+        });
+
+        startOverlay.addEventListener('click', (e) => {
+            if (e.target === startOverlay) {
+                startOverlay.style.display = 'none';
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                // --- MODIFIKASI: Panggil fungsi update untuk kedua tombol ---
+                updateSpeakerButton();
+                updateBeepButton();
+                loadDetectionModel();
+                startListening();
+            }
+        });
+    </script>
+</body>
+</html>
